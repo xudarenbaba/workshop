@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
-#include <sys/time.h>   // 仍保留，若你还有别处用到 gettimeofday
+#include <sys/time.h>
 #include <errno.h>
 
 #include "mul.h"
