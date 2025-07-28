@@ -1,100 +1,85 @@
+// thrmodel.c
 #include <pthread.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
 
 #include "mul.h"
-#include "vector.h"
 
-#define xstr(s) x_str(s)
-#define x_str(s) #s
+typedef struct tparam {
+    TYPE (*a)[NUM];
+    TYPE (*bT)[NUM];
+    TYPE (*c)[NUM];
+    int   msize;
+    int   tidx;
+    int   numt;
+} tparam_t;
 
-typedef struct tparam
+static void *ThreadFunction(void *ptr)
 {
-	array *a, *b, *c, *t;
-	int msize;
-	int tidx;
-	int numt;
-	Vector *vec;
-} _tparam;
+    tparam_t *par = (tparam_t *)ptr;
+    assert(par->numt > 0);
+    assert(par->a && par->bT && par->c);
 
-void *ThreadFunction(void *ptr)
-{
-	_tparam* par = (_tparam*)ptr;
-	assert(par->numt > 0);
-	assert(par->a != NULL);
-	assert(par->b != NULL);
-	assert(par->c != NULL);
-	assert(par->t != NULL);
-	assert( (par->msize % par->numt) == 0);
+    mul_kernel(par->msize, par->tidx, par->numt, par->a, par->bT, par->c);
 
-	mul(par->msize, par->tidx, par->numt, par->vec, par->a, par->b, par->c, par->t);
-
-	// destroy vector here
-	// vector_destroy(par->vec);
-
-	pthread_exit((void *)0);
+    return NULL;
 }
 
-
-void ParallelMultiply(int msize, TYPE a[][NUM], TYPE b[][NUM], TYPE c[][NUM], TYPE t[][NUM])
+void ParallelMultiply(int msize,
+                      TYPE (*restrict a)[NUM],
+                      TYPE (*restrict bT)[NUM],
+                      TYPE (*restrict c)[NUM])
 {
-	int NTHREADS = MAXTHREADS;
-	int MSIZE = NUM;
+    int NTHREADS = MAXTHREADS;
+    int MSIZE    = NUM;
 
-	pthread_t ht[MAXTHREADS];
-	int tret[MAXTHREADS]; 
-	int rc; 
-	void* status;
-	_tparam par[MAXTHREADS];
-	int tidx;
+    pthread_t ht[MAXTHREADS];
+    tparam_t  par[MAXTHREADS];
 
-	GetModelParams(&NTHREADS, &MSIZE, 0);
+    GetModelParams(&NTHREADS, &MSIZE, 0);
 
-	for (tidx = 0; tidx < NTHREADS; tidx++) {
-		par[tidx].msize = MSIZE;
-		par[tidx].numt = NTHREADS;
-		par[tidx].tidx = tidx;
-		par[tidx].vec = vector_create();
-		par[tidx].a = a;
-		par[tidx].b = b;
-		par[tidx].c = c;
-		par[tidx].t = t;
-		tret[tidx] = pthread_create(&ht[tidx], NULL, (void*)ThreadFunction, (void*) &par[tidx]);
-	}
+    for (int tidx = 0; tidx < NTHREADS; tidx++) {
+        par[tidx].msize = MSIZE;
+        par[tidx].numt  = NTHREADS;
+        par[tidx].tidx  = tidx;
+        par[tidx].a     = a;
+        par[tidx].bT    = bT;
+        par[tidx].c     = c;
 
-	for (tidx = 0; tidx < NTHREADS; tidx++) {
-		rc = pthread_join(ht[tidx], (void **)&status);
-	}
+        int rc = pthread_create(&ht[tidx], NULL, ThreadFunction, &par[tidx]);
+        if (rc != 0) {
+            fprintf(stderr, "pthread_create failed: %d\n", rc);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    for (int tidx = 0; tidx < NTHREADS; tidx++) {
+        int rc = pthread_join(ht[tidx], NULL);
+        if (rc != 0) {
+            fprintf(stderr, "pthread_join failed: %d\n", rc);
+            exit(EXIT_FAILURE);
+        }
+    }
 }
 
-extern int getCPUCount();
-
-void GetModelParams(int* p_nthreads, int* p_msize, int print)
+void GetModelParams(int *p_nthreads, int *p_msize, int print)
 {
-	int nthr = MAXTHREADS;
-	int msize = NUM;
-	int ncpu = getCPUCount();
+    int nthr  = MAXTHREADS;
+    int msize = NUM;
+    int ncpu  = getCPUCount();
 
-	if (ncpu < MAXTHREADS) {
-		nthr = ncpu;
-	}
+    if (ncpu < MAXTHREADS)
+        nthr = ncpu;
 
-	// Making sure the matrix size and the nthreads are aligned
-	// If you want more robust threading implementation, take care
-	// of the matrix tails
-	while ((msize % nthr) != 0 )
-		nthr--;
+    while ((msize % nthr) != 0)
+        nthr--;
 
-	if(p_nthreads != 0)
-		*p_nthreads = nthr;
-	if(p_msize != 0)
-		*p_msize = msize;
+    if (p_nthreads) *p_nthreads = nthr;
+    if (p_msize)    *p_msize    = msize;
 
-	if(print) {
-		printf("Threads: %d\n", nthr);
-		fflush(stdout);
-		printf("Matrix size: %d\n",msize);
-		fflush(stdout);
-	}
+    if (print) {
+        printf("Threads: %d\n", nthr);  fflush(stdout);
+        printf("Matrix size: %d\n", msize); fflush(stdout);
+    }
 }
