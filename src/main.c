@@ -1,40 +1,39 @@
-#include <pthread.h>
+// main.c
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
-#include <malloc.h>
-#include <sys/time.h>
+#include <sys/time.h>   // 仍保留，若你还有别处用到 gettimeofday
+#include <errno.h>
 
 #include "mul.h"
 
-typedef unsigned long long  UINT64;
+typedef unsigned long long UINT64;
 
-double TRIP_COUNT = (double)NUM * (double)NUM * (double)NUM;
-int FLOP_PER_ITERATION = 2;
+static const double TRIP_COUNT = (double)NUM * NUM * NUM;
+static const int    FLOP_PER_ITERATION = 2;
 
-extern int getCPUCount();
-extern double getCPUFreq();
+static inline double now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
 
 // Initialize an array with data
-void init_arr(TYPE row, TYPE col, TYPE off, TYPE a[][NUM])
+void init_arr(TYPE row, TYPE col, TYPE off, TYPE (*a)[NUM])
 {
-    int i,j;
-
-    for (i = 0; i < NUM; i++) {
-        for (j = 0; j< NUM; j++) {
+    for (int i = 0; i < NUM; i++) {
+        for (int j = 0; j < NUM; j++) {
             a[i][j] = row * i + col * j + off;
         }
     }
 }
 
 // Print out contents of small arrays
-void print_arr(char *name, TYPE array[][NUM])
+void print_arr(const char *name, TYPE (*array)[NUM])
 {
-    int i,j;
-  
     printf("\n%s\n", name);
-    for (i = 0; i < NUM; i++){
-        for (j = 0; j < NUM; j++) {
+    for (int i = 0; i < NUM; i++){
+        for (int j = 0; j < NUM; j++) {
             printf("%g\t", array[i][j]);
         }
         printf("\n");
@@ -42,67 +41,58 @@ void print_arr(char *name, TYPE array[][NUM])
     }
 }
 
-void MultiplyOnce(int iter)
+static void MultiplyOnce(int iter,
+                         TYPE (*a)[NUM],
+                         TYPE (*b)[NUM],
+                         TYPE (*c)[NUM],
+                         TYPE (*t)[NUM])
 {
-    double start=0.0, stop=0.0;
-    struct timeval  before, after;
-    double secs;
-   	double flops;
-	double mflops;
+    // 初始化数据（如不需要每次变动，可仅首次初始化）
+    init_arr(3, -2, 1, a);
+    init_arr(-2, 1, 3, b);
 
-	char *buf1, *buf2, *buf3, *buf4;
-	char *addr1, *addr2, *addr3, *addr4;
-	array *a, *b, *c, *t;
-	int Offset_Addr1 = 128, Offset_Addr2 = 192, Offset_Addr3 = 0, Offset_Addr4 = 64;
+    // 这里将 b 转置到 t，以提升访存局部性（mul.c 已配合修改）
+    transpose_mat(NUM, b, t);
 
-	buf1 = (char *) malloc(NUM*NUM*(sizeof (double))+1024);
-	addr1 = buf1 + 256 - ((UINT64)buf1%256) + (UINT64)Offset_Addr1;
-	
-	buf2 = (char *) malloc(NUM*NUM*(sizeof (double))+1024);
-	addr2 = buf2 + 256 - ((UINT64)buf2%256) + (UINT64)Offset_Addr2;
-	
-	buf3 = (char *) malloc(NUM*NUM*(sizeof (double))+1024);
-	addr3 = buf3 + 256 - ((UINT64)buf3%256) + (UINT64)Offset_Addr3;
+    double t0 = now_sec();
+    ParallelMultiply(NUM, a, t, c);   // 传入转置后的 t（见 mul.h / mul.c）
+    double t1 = now_sec();
 
-	buf4 = (char *) malloc(NUM*NUM*(sizeof (double))+1024);
-	addr4 = buf4 + 256 - ((UINT64)buf4%256) + (UINT64)Offset_Addr4;
+    double secs  = t1 - t0;
+    double flops = TRIP_COUNT * FLOP_PER_ITERATION;
+    double mflops = flops / 1e6 / secs;
 
-	a = (array *)addr1;
-	b = (array *)addr2;
-	c = (array *)addr3;
-	t = (array *)addr4;
+    printf("Matrix multiply iteration %d: %6.3f s  (%.2f MFLOPS)\n", iter, secs, mflops);
+    fflush(stdout);
+}
 
-    // initialize the arrays with data
-	init_arr(3, -2, 1, a);
-	init_arr(-2, 1, 3, b);
-	init_arr(1, 3, -2, t);
-	
-	gettimeofday(&before, NULL);
-
-	ParallelMultiply(NUM, a, b, c, t);
-
-	gettimeofday(&after, NULL);
-	secs = (after.tv_sec - before.tv_sec) + (after.tv_usec - before.tv_usec)/1000000.0;
-
-	flops = TRIP_COUNT * FLOP_PER_ITERATION;
-	mflops = flops / 1000000.0f / secs;
-	printf("Matrix multiply iteration %d: cost %2.3lf seconds\n", iter, secs);
-	fflush(stdout);
-
-    // free memory
-	free (buf1);
-	free (buf2);
-	free (buf3);
-	free (buf4);
-}   
-
-int main()
+int main(void)
 {
     Initialize();
-    
-    for (int i = 1; i <= 100; i++) {
-        MultiplyOnce(i);
+
+    // 一次性分配并对齐
+    TYPE (*a)[NUM];
+    TYPE (*b)[NUM];
+    TYPE (*c)[NUM];
+    TYPE (*t)[NUM];
+    size_t bytes = (size_t)NUM * NUM * sizeof(TYPE);
+
+    if (posix_memalign((void **)&a, 256, bytes) ||
+        posix_memalign((void **)&b, 256, bytes) ||
+        posix_memalign((void **)&c, 256, bytes) ||
+        posix_memalign((void **)&t, 256, bytes)) {
+        perror("posix_memalign");
+        return EXIT_FAILURE;
     }
+
+    for (int i = 1; i <= 100; i++) {
+        MultiplyOnce(i, a, b, c, t);
+    }
+
+    free(a);
+    free(b);
+    free(c);
+    free(t);
 
     return 0;
 }
