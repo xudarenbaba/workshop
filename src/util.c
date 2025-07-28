@@ -1,3 +1,5 @@
+// util.c
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,91 +9,98 @@
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #define MEMORY_LIMIT_MB 256
 #define CGROUP_PATH "/sys/fs/cgroup/memory/cgrp1"
-
 #define BUFLEN 110
 
-double getCPUFreq()
+double getCPUFreq(void)
 {
-   FILE* sysinfo;
-   char* ptr;
-   char buf[BUFLEN];
-   char key[] = "cpu MHz";
-   int keylen = sizeof( key ) - 1;
-   double freq = -1;
+    FILE *sysinfo;
+    char buf[BUFLEN];
+    const char key[] = "cpu MHz";
+    const size_t keylen = sizeof(key) - 1;
+    double freq = -1.0;
 
-   sysinfo = fopen( "/proc/cpuinfo", "r" );
-   if( sysinfo != NULL ) {
-      while( fgets( buf, BUFLEN, sysinfo ) != NULL ) {
-         if( !strncmp( buf, key, keylen ) ) {
-            ptr = strstr( buf, ":" );
-            freq = atof( ptr+1 ) * 1000000;
-            break;
-         }
-      }
-      fclose( sysinfo );
-   }
-   fprintf(stderr, "Freq = %f GHz\n", freq / 1000000000);
-   return freq;
+    sysinfo = fopen("/proc/cpuinfo", "r");
+    if (sysinfo) {
+        while (fgets(buf, BUFLEN, sysinfo)) {
+            if (!strncmp(buf, key, keylen)) {
+                char *ptr = strchr(buf, ':');
+                if (ptr) freq = atof(ptr + 1) * 1e6;
+                break;
+            }
+        }
+        fclose(sysinfo);
+    }
+    // 可注释掉
+    fprintf(stderr, "Freq = %f GHz\n", freq / 1e9);
+    return freq;
 }
 
-int getCPUCount()
+int getCPUCount(void)
 {
-	return sysconf(_SC_NPROCESSORS_CONF);
+    return sysconf(_SC_NPROCESSORS_CONF);
 }
 
-void Initialize()
+static int safe_write_str(int fd, const char *s)
 {
-    struct stat st = { 0 };
-    char mlim_path[] = CGROUP_PATH "/memory.limit_in_bytes";
-    char mlim_str[64], pid_str[64];
+    size_t len = strlen(s);
+    return (write(fd, s, len) == (ssize_t)len) ? 0 : -1;
+}
+
+void Initialize(void)
+{
+    struct stat st = {0};
+    char mlim_path[]  = CGROUP_PATH "/memory.limit_in_bytes";
     char tasks_path[] = CGROUP_PATH "/tasks";
-    int mlim_fd = -1, tasks_fd = -1;
+    char mlim_str[64], pid_str[64];
 
-    // Check if the cgroup already exists
+    // 若没有权限或不在 cgroup v1 环境，可直接返回
+    if (stat("/sys/fs/cgroup", &st) == -1) {
+        perror("cgroup fs not available");
+        return;
+    }
+
+    // 尝试删除已有目录（忽略错误）
     if (stat(CGROUP_PATH, &st) == 0) {
-        // If the cgroup already exists, delete it first
-        if (rmdir(CGROUP_PATH) == -1) {
-            perror("Error deleting existing cgroup");
-            exit(EXIT_FAILURE);
+        if (rmdir(CGROUP_PATH) == -1 && errno != ENOENT) {
+            // 无法删除说明可能已有内容，忽略即可
         }
     }
 
-    // Create a new cgroup
     if (mkdir(CGROUP_PATH, S_IRUSR | S_IWUSR | S_IXUSR) == -1) {
-        perror("Error creating cgroup");
-        exit(EXIT_FAILURE);
+        // 如果失败，打印警告然后返回
+        perror("mkdir cgroup");
+        return;
     }
 
-    // Set the cgroup's memory limit
-    mlim_fd = open(mlim_path, O_WRONLY);
+    int mlim_fd = open(mlim_path, O_WRONLY);
     if (mlim_fd == -1) {
-        perror("Error opening memory limit file");
-        exit(EXIT_FAILURE);
+        perror("open memory.limit_in_bytes");
+        return;
     }
 
     snprintf(mlim_str, sizeof(mlim_str), "%dM", MEMORY_LIMIT_MB);
-    if (write(mlim_fd, mlim_str, sizeof(mlim_str)) == -1) {
-        perror("Error setting memory limit");
+    if (safe_write_str(mlim_fd, mlim_str) == -1) {
+        perror("write memory limit");
         close(mlim_fd);
-        exit(EXIT_FAILURE);
+        return;
     }
     close(mlim_fd);
 
-    // Add the current process to the cgroup
-    tasks_fd = open(tasks_path, O_WRONLY);
+    int tasks_fd = open(tasks_path, O_WRONLY);
     if (tasks_fd == -1) {
-        perror("Error opening tasks file");
-        exit(EXIT_FAILURE);
+        perror("open tasks file");
+        return;
     }
 
     snprintf(pid_str, sizeof(pid_str), "%d", getpid());
-    if (write(tasks_fd, pid_str, sizeof(pid_str)) == -1) {
-        perror("Error adding the current process to cgroup");
+    if (safe_write_str(tasks_fd, pid_str) == -1) {
+        perror("write tasks");
         close(tasks_fd);
-        exit(EXIT_FAILURE);
+        return;
     }
     close(tasks_fd);
 }
